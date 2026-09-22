@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IT Agent</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>IT Agent</h1>
+      <p class="subtitle">Index your Google Drive files, then ask questions about them.</p>
+    </header>
+
+    <section class="card" id="auth-card">
+      <h2>1. Connect Google Drive</h2>
+      <p id="auth-status">Checking connection...</p>
+      <div class="row">
+        <a id="connect-btn" class="btn" href="/auth/google">Connect Google Drive</a>
+        <button id="disconnect-btn" class="btn btn-secondary" style="display:none">Disconnect</button>
+      </div>
+    </section>
+
+    <section class="card" id="index-card">
+      <h2>2. Index a folder</h2>
+      <p>Paste a Google Drive folder link or ID. All files in it (including subfolders) will be indexed.</p>
+      <div class="row">
+        <input id="folder-input" type="text" placeholder="https://drive.google.com/drive/folders/..." />
+        <button id="index-btn" class="btn">Index folder</button>
+      </div>
+      <p id="index-status" class="status"></p>
+      <ul id="skipped-list" class="skipped"></ul>
+      <div id="files-list" class="files"></div>
+    </section>
+
+    <section class="card" id="ask-card">
+      <h2>3. Ask a question</h2>
+      <div id="chat" class="chat"></div>
+      <div class="row">
+        <input id="question-input" type="text" placeholder="Ask about the indexed files..." />
+        <button id="ask-btn" class="btn">Ask</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
