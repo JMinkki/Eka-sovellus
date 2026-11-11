@@ -659,6 +659,7 @@ window.CubeSolver = (function () {
   }
 
   function onMoveDone(m) {
+    clearHint();
     trail.push({ axis: m.axis, layer: m.layer, dir: m.dir });
     if (m.kind === 'scramble') {
       if (m.last) { state = 'ready'; updateUI(); }
@@ -701,6 +702,7 @@ window.CubeSolver = (function () {
 
   function resetCube() {
     queue.length = 0; anim = null;
+    clearHint();
     build(N);
     moves = 0; elapsed = 0; history = []; log = []; trail = [];
     state = 'idle'; note = null;
@@ -756,8 +758,59 @@ window.CubeSolver = (function () {
   }
 
   // Solve (or hint) from whatever position the cube is in now.
+  // ---------- Hint marker on the cube ----------
+  // A glowing outline around the layer to turn, and a ring of arrows around it
+  // that spins in the turning direction. Removed as soon as any turn is made.
+  const HINT_COLOR = 0xff2bd6; // magenta: differs from every sticker colour
+  let hint = null;
+
+  function clearHint() {
+    if (!hint) return;
+    scene.remove(hint.group);
+    hint.group.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    hint = null;
+  }
+
+  function showHint(m) {
+    clearHint();
+    const axisVec = new THREE.Vector3(m.axis === 'x' ? 1 : 0, m.axis === 'y' ? 1 : 0, m.axis === 'z' ? 1 : 0);
+    const group = new THREE.Group();
+    group.position.copy(axisVec).multiplyScalar(m.layer);
+    group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axisVec); // local z = turning axis
+
+    // Outline + light fill around the layer.
+    const box = new THREE.BoxGeometry(N + 0.12, N + 0.12, 1.08);
+    const fillMat = new THREE.MeshBasicMaterial({ color: HINT_COLOR, transparent: true, opacity: 0.1, depthWrite: false });
+    group.add(new THREE.Mesh(box, fillMat));
+    group.add(new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: HINT_COLOR })));
+
+    // Ring of arrows around the layer, pointing in the turning direction.
+    const ring = new THREE.Group();
+    const R = (half + 0.5) * Math.SQRT2 + 0.35;
+    const mat = new THREE.MeshBasicMaterial({ color: HINT_COLOR });
+    const arrows = 4;
+    for (let i = 0; i < arrows; i++) {
+      const seg = new THREE.Group();
+      seg.rotation.z = (i * 2 * Math.PI) / arrows;
+      const arcLen = (2 * Math.PI) / arrows - 0.5;
+      const arc = new THREE.Mesh(new THREE.TorusGeometry(R, 0.07, 8, 32, arcLen), mat);
+      if (m.dir < 0) arc.rotation.z = 0.5; // keep the gap in front of the arrowhead
+      const head = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.45, 16), mat);
+      // A cone points along +y; at angle a on the circle the turning direction is (-sin a, cos a) * dir.
+      const a = m.dir > 0 ? arcLen + 0.15 : 0.35;
+      head.position.set(R * Math.cos(a), R * Math.sin(a), 0);
+      head.rotation.z = a + (m.dir > 0 ? 0 : Math.PI);
+      seg.add(arc, head);
+      ring.add(seg);
+    }
+    group.add(ring);
+    scene.add(group);
+    hint = { group, ring, fillMat, dir: m.dir };
+  }
+
   function runSolver(hintOnly) {
     if (busy() || state === 'scrambling' || state === 'autosolve') return;
+    clearHint();
     if (isSolved()) { note = { text: 'The cube is already solved.', cls: 'done' }; updateUI(); return; }
     note = { text: CubeSolver.isReady(N) ? 'Thinking…' : 'Preparing the solver (first time takes a few seconds)…', cls: 'live' };
     updateUI();
@@ -769,7 +822,13 @@ window.CubeSolver = (function () {
         return;
       }
       if (hintOnly) {
-        note = { text: 'Hint: turn ' + sol.tokens[0] + ' (' + sol.tokens.length + ' moves from solved)', cls: 'live' };
+        const tok = sol.tokens[0];
+        showHint(sol.moves[0]);
+        note = {
+          text: 'Hint: turn the highlighted layer the way the arrows go' + (tok.includes('2') ? ', a half turn' : '') +
+            ' (' + tok + ', ' + sol.tokens.length + (sol.tokens.length === 1 ? ' move' : ' moves') + ' from solved)',
+          cls: 'live',
+        };
         updateUI();
         return;
       }
@@ -928,6 +987,10 @@ window.CubeSolver = (function () {
     }
     if (!anim && queue.length) startNext(now);
     if (state === 'solving') $('time').textContent = fmt(now - t0);
+    if (hint && !reduceMotion) {
+      hint.ring.rotation.z = hint.dir * ((now / 1000) % (2 * Math.PI)) * 0.9;
+      hint.fillMat.opacity = 0.05 + 0.1 * (0.5 + 0.5 * Math.sin(now / 250));
+    }
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
   }
