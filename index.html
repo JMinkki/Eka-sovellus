@@ -19,6 +19,7 @@
   --accent: #1f4fd1;
   --accent-ink: #ffffff;
   --good: #14804a;
+  --warn: #b4410f;
   --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
   --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -26,12 +27,12 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #11141b; --panel: #1a1e28; --ink: #e9ecf3; --muted: #98a1b5; --line: #2c3241;
-    --accent: #7b9cff; --accent-ink: #0d1120; --good: #4cd38a; color-scheme: dark;
+    --accent: #7b9cff; --accent-ink: #0d1120; --good: #4cd38a; --warn: #ff9a5c; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #11141b; --panel: #1a1e28; --ink: #e9ecf3; --muted: #98a1b5; --line: #2c3241;
-  --accent: #7b9cff; --accent-ink: #0d1120; --good: #4cd38a; color-scheme: dark;
+  --accent: #7b9cff; --accent-ink: #0d1120; --good: #4cd38a; --warn: #ff9a5c; color-scheme: dark;
 }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
@@ -75,6 +76,14 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 }
 .status.live { color: var(--accent); border-color: var(--accent); }
 .status.done { color: var(--good); border-color: var(--good); }
+.status.warn { color: var(--warn); border-color: var(--warn); white-space: normal; }
+.setup { display: flex; gap: 8px; align-items: center; }
+.setup label { font-weight: 600; white-space: nowrap; }
+.setup input {
+  flex: 1; min-width: 0; font: 500 14px/1 var(--font-mono); color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px;
+}
+.setup input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .win {
   position: absolute; inset: auto 12px 12px; z-index: 3; margin: 0 auto; max-width: 340px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
@@ -127,6 +136,8 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
       </select>
       <button id="scramble" class="primary">Scramble</button>
       <button id="undo">Undo</button>
+      <button id="hint">Hint</button>
+      <button id="solve">Solve</button>
       <button id="reset">Reset</button>
     </div>
   </header>
@@ -144,6 +155,11 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
   </main>
 
   <footer class="foot">
+    <form id="setupForm" class="setup" autocomplete="off">
+      <label for="setup">Start from</label>
+      <input id="setup" type="text" spellcheck="false" placeholder="Type a position as moves, e.g. R U R' U' F2 D">
+      <button id="apply" type="submit">Apply</button>
+    </form>
     <div id="log" class="log" aria-live="polite"></div>
     <p class="help">Drag a face to turn that layer. Drag empty space to look around, scroll to zoom.
       <span class="keys">Keys: <kbd>U</kbd> <kbd>D</kbd> <kbd>L</kbd> <kbd>R</kbd> <kbd>F</kbd> <kbd>B</kbd> <kbd>M</kbd> <kbd>E</kbd> <kbd>S</kbd>, hold <kbd>Shift</kbd> for counter-clockwise, <kbd>Ctrl</kbd>+<kbd>Z</kbd> to undo.</span></p>
@@ -151,6 +167,226 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/*
+ * CubeSolver: pure cube logic, no graphics.
+ * A cube state is {cp, co, ep, eo}: corner/edge permutation and orientation
+ * (Kociemba's cubie model). Moves are numbered face*3 + (power-1) with faces
+ * in the order U R F D L B, so 0 = U, 1 = U2, 2 = U', 3 = R, ...
+ *  - solve3: two-phase algorithm (phase 1 reaches <U,D,R2,L2,F2,B2>, phase 2 solves it).
+ *  - solve2: 2x2x2 with the DBL corner fixed; an exact distance table gives an optimal solution.
+ */
+window.CubeSolver = (function () {
+  const C = (cp, co, ep, eo) => ({ cp, co, ep, eo });
+  const Z8 = [0, 0, 0, 0, 0, 0, 0, 0];
+  const Z12 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const SOLVED = C([0, 1, 2, 3, 4, 5, 6, 7], Z8, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], Z12);
+
+  function mul(a, b) {
+    const cp = new Array(8), co = new Array(8), ep = new Array(12), eo = new Array(12);
+    for (let i = 0; i < 8; i++) { cp[i] = a.cp[b.cp[i]]; co[i] = (a.co[b.cp[i]] + b.co[i]) % 3; }
+    for (let i = 0; i < 12; i++) { ep[i] = a.ep[b.ep[i]]; eo[i] = (a.eo[b.ep[i]] + b.eo[i]) & 1; }
+    return C(cp, co, ep, eo);
+  }
+
+  // Quarter turns of each face (clockwise seen from that face).
+  const BASE = [
+    C([3, 0, 1, 2, 4, 5, 6, 7], Z8, [3, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11], Z12), // U
+    C([4, 1, 2, 0, 7, 5, 6, 3], [2, 0, 0, 1, 1, 0, 0, 2], [8, 1, 2, 3, 11, 5, 6, 7, 4, 9, 10, 0], Z12), // R
+    C([1, 5, 2, 3, 0, 4, 6, 7], [1, 2, 0, 0, 2, 1, 0, 0], [0, 9, 2, 3, 4, 8, 6, 7, 1, 5, 10, 11], [0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0]), // F
+    C([0, 1, 2, 3, 5, 6, 7, 4], Z8, [0, 1, 2, 3, 5, 6, 7, 4, 8, 9, 10, 11], Z12), // D
+    C([0, 2, 6, 3, 4, 1, 5, 7], [0, 1, 2, 0, 0, 2, 1, 0], [0, 1, 10, 3, 4, 5, 9, 7, 8, 2, 6, 11], Z12), // L
+    C([0, 1, 3, 7, 4, 5, 2, 6], [0, 0, 1, 2, 0, 0, 2, 1], [0, 1, 2, 11, 4, 5, 6, 10, 8, 9, 3, 7], [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1]), // B
+  ];
+  const MOVES = [];
+  for (const b of BASE) { const m2 = mul(b, b); MOVES.push(b, m2, mul(m2, b)); }
+
+  function rank(a) { // Lehmer code: permutation -> 0 .. n!-1
+    let r = 0;
+    for (let i = 0; i < a.length; i++) {
+      let c = 0;
+      for (let j = i + 1; j < a.length; j++) if (a[j] < a[i]) c++;
+      r = r * (a.length - i) + c;
+    }
+    return r;
+  }
+  const twistKey = (c) => { let k = 0; for (let i = 0; i < 7; i++) k = k * 3 + c.co[i]; return k; };
+  const flipKey = (c) => { let k = 0; for (let i = 0; i < 11; i++) k = k * 2 + c.eo[i]; return k; };
+  const sliceKey = (c) => { let k = 0; for (let i = 0; i < 12; i++) if (c.ep[i] >= 8) k |= 1 << i; return k; };
+  const cornerKey = (c) => rank(c.cp);
+  const udEdgeKey = (c) => rank(c.ep.slice(0, 8));
+  const slicePermKey = (c) => rank(c.ep.slice(8));
+
+  // Explore a coordinate from the solved state: dense ids (solved = 0) and a move table.
+  function coordTable(keyFn, keySpace, moves) {
+    const ids = new Int32Array(keySpace).fill(-1);
+    const reps = [SOLVED];
+    ids[keyFn(SOLVED)] = 0;
+    const M = moves.length, trans = [];
+    for (let i = 0; i < reps.length; i++) {
+      for (let m = 0; m < M; m++) {
+        const nc = mul(reps[i], moves[m]);
+        const k = keyFn(nc);
+        if (ids[k] < 0) { ids[k] = reps.length; reps.push(nc); }
+        trans.push(ids[k]);
+      }
+    }
+    return { n: reps.length, move: Int32Array.from(trans), id: (c) => ids[keyFn(c)] };
+  }
+
+  // Distance-to-solved for every pair of two coordinates (breadth-first, layer by layer).
+  function pruneTable(A, B, M) {
+    const size = A.n * B.n, t = new Int8Array(size).fill(-1);
+    t[0] = 0;
+    let filled = 1;
+    for (let d = 0; filled < size && d < 30; d++) {
+      for (let i = 0; i < size; i++) {
+        if (t[i] !== d) continue;
+        const a = (i / B.n) | 0, b = i - a * B.n;
+        for (let m = 0; m < M; m++) {
+          const j = A.move[a * M + m] * B.n + B.move[b * M + m];
+          if (t[j] < 0) { t[j] = d + 1; filled++; }
+        }
+      }
+    }
+    return t;
+  }
+
+  function validate(c) {
+    const isPerm = (p) => p.slice().sort((x, y) => x - y).every((v, i) => v === i);
+    const parity = (p) => { let s = 0; for (let i = 0; i < p.length; i++) for (let j = i + 1; j < p.length; j++) if (p[j] < p[i]) s++; return s & 1; };
+    if (!isPerm(c.cp) || !isPerm(c.ep)) throw new Error('some pieces appear twice');
+    if (c.co.reduce((a, b) => a + b, 0) % 3) throw new Error('a corner is twisted');
+    if (c.eo.reduce((a, b) => a + b, 0) % 2) throw new Error('an edge is flipped');
+    if (parity(c.cp) !== parity(c.ep)) throw new Error('two pieces are swapped');
+  }
+
+  const sameOrOpposite = (m, last) => {
+    if (last < 0) return false;
+    const f = (m / 3) | 0, lf = (last / 3) | 0;
+    return f === lf || (f % 3 === lf % 3 && f < lf);
+  };
+
+  // ----- 3x3x3 -----
+  const P2 = [0, 1, 2, 9, 10, 11, 4, 13, 7, 16]; // U U2 U' D D2 D' R2 L2 F2 B2
+  const IS_P2 = new Array(18).fill(false); P2.forEach((m) => { IS_P2[m] = true; });
+  let T3 = null;
+  function init3() {
+    if (T3) return T3;
+    const m2 = P2.map((i) => MOVES[i]);
+    const tw = coordTable(twistKey, 2187, MOVES), fl = coordTable(flipKey, 2048, MOVES), sl = coordTable(sliceKey, 4096, MOVES);
+    const cp = coordTable(cornerKey, 40320, m2), ud = coordTable(udEdgeKey, 40320, m2), sp = coordTable(slicePermKey, 24, m2);
+    T3 = { tw, fl, sl, cp, ud, sp, pTS: pruneTable(tw, sl, 18), pFS: pruneTable(fl, sl, 18), pCS: pruneTable(cp, sp, 10), pUS: pruneTable(ud, sp, 10) };
+    return T3;
+  }
+
+  function solve3(cube, timeLimitMs) {
+    validate(cube);
+    const T = init3();
+    const limitMs = timeLimitMs || 600;
+    const t0 = performance.now();
+    const SL = T.sl.n, SP = T.sp.n;
+    let best = null, stop = false;
+    const sol1 = [], sol2 = [];
+
+    function phase2(cp, ud, sp, togo, last) {
+      if (togo === 0) return cp === 0 && ud === 0 && sp === 0;
+      for (let j = 0; j < 10; j++) {
+        const m = P2[j];
+        if (sameOrOpposite(m, last)) continue;
+        const ncp = T.cp.move[cp * 10 + j], nud = T.ud.move[ud * 10 + j], nsp = T.sp.move[sp * 10 + j];
+        if (Math.max(T.pCS[ncp * SP + nsp], T.pUS[nud * SP + nsp]) > togo - 1) continue;
+        sol2.push(m);
+        if (phase2(ncp, nud, nsp, togo - 1, m)) return true;
+        sol2.pop();
+      }
+      return false;
+    }
+
+    function tryPhase2() {
+      let c = cube;
+      for (const m of sol1) c = mul(c, MOVES[m]);
+      const cp = T.cp.id(c), ud = T.ud.id(c), sp = T.sp.id(c);
+      const maxLen = Math.min(18, (best ? best.length - 1 : 30) - sol1.length);
+      const h = Math.max(T.pCS[cp * SP + sp], T.pUS[ud * SP + sp]);
+      const last = sol1.length ? sol1[sol1.length - 1] : -1;
+      for (let d = h; d <= maxLen; d++) {
+        sol2.length = 0;
+        if (phase2(cp, ud, sp, d, last)) { best = sol1.concat(sol2); return; }
+      }
+    }
+
+    function phase1(tw, fl, sl, togo, last) {
+      if (stop) return;
+      if (togo === 0) {
+        if (last < 0 || !IS_P2[last]) tryPhase2();
+        if (best && (best.length <= 20 || performance.now() - t0 > limitMs)) stop = true;
+        return;
+      }
+      for (let m = 0; m < 18; m++) {
+        if (sameOrOpposite(m, last)) continue;
+        const ntw = T.tw.move[tw * 18 + m], nfl = T.fl.move[fl * 18 + m], nsl = T.sl.move[sl * 18 + m];
+        if (Math.max(T.pTS[ntw * SL + nsl], T.pFS[nfl * SL + nsl]) > togo - 1) continue;
+        sol1.push(m);
+        phase1(ntw, nfl, nsl, togo - 1, m);
+        sol1.pop();
+        if (stop) return;
+      }
+    }
+
+    const tw = T.tw.id(cube), fl = T.fl.id(cube), sl = T.sl.id(cube);
+    for (let d = Math.max(T.pTS[tw * SL + sl], T.pFS[fl * SL + sl]); d <= 12 && !stop; d++) phase1(tw, fl, sl, d, -1);
+    if (!best) throw new Error('no solution found');
+    return simplify(best);
+  }
+
+  function simplify(moves) { // merge turns of the same face, e.g. R R2 -> R'
+    const out = [];
+    for (const m of moves) {
+      const top = out[out.length - 1];
+      if (top !== undefined && ((top / 3) | 0) === ((m / 3) | 0)) {
+        out.pop();
+        const p = ((top % 3) + 1 + (m % 3) + 1) % 4;
+        if (p) out.push(((m / 3) | 0) * 3 + p - 1);
+      } else out.push(m);
+    }
+    return out;
+  }
+
+  // ----- 2x2x2 (U, R, F turns only; DBL corner stays put) -----
+  let T2 = null;
+  function init2() {
+    if (T2) return T2;
+    const m = MOVES.slice(0, 9);
+    const cp = coordTable(cornerKey, 40320, m), tw = coordTable(twistKey, 2187, m);
+    T2 = { cp, tw, pr: pruneTable(cp, tw, 9) };
+    return T2;
+  }
+  function solve2(cube) {
+    const T = init2();
+    let a = T.cp.id(cube), b = T.tw.id(cube);
+    if (a < 0 || b < 0 || cube.cp[6] !== 6 || cube.co[6] !== 0) throw new Error('the corners do not form a valid cube');
+    if (cube.co.reduce((x, y) => x + y, 0) % 3) throw new Error('a corner is twisted');
+    let d = T.pr[a * T.tw.n + b];
+    const out = [];
+    while (d > 0) {
+      let moved = false;
+      for (let m = 0; m < 9; m++) {
+        const na = T.cp.move[a * 9 + m], nb = T.tw.move[b * 9 + m];
+        if (T.pr[na * T.tw.n + nb] === d - 1) { out.push(m); a = na; b = nb; d--; moved = true; break; }
+      }
+      if (!moved) throw new Error('no solution found');
+    }
+    return out;
+  }
+
+  return {
+    solve3, solve2,
+    isReady: (n) => (n === 3 ? !!T3 : n === 2 ? !!T2 : true),
+    moveName: (m) => 'URFDLB'[(m / 3) | 0] + ['', '2', "'"][m % 3],
+  };
+})();
+</script>
 <script>
 (function () {
   const THREE = window.THREE;
@@ -285,25 +521,129 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
     const depth = Math.round(half - Math.abs(m.layer)) + 1;
     return (depth > 1 ? depth : '') + face + (m.dir === -s ? '' : "'");
   }
-  function faceMove(letter, prime) {
+  function faceMove(letter, prime, depth) {
+    depth = depth || 1;
     for (const axis in FACE_NAMES) {
       const idx = FACE_NAMES[axis].indexOf(letter);
       if (idx < 0) continue;
+      if (depth > Math.floor(N / 2)) return null;
       const s = idx === 0 ? 1 : -1;
-      return { axis, layer: s * half, dir: -s * (prime ? -1 : 1) };
+      return { axis, layer: s * (half - (depth - 1)), dir: -s * (prime ? -1 : 1) };
     }
     for (const axis in SLICES) {
-      if (SLICES[axis][0] === letter && N % 2 === 1) {
+      if (SLICES[axis][0] === letter && N % 2 === 1 && depth === 1) {
         return { axis, layer: 0, dir: SLICES[axis][1] * (prime ? -1 : 1) };
       }
     }
     return null;
   }
 
+  // ---------- Reading the cube for the solver ----------
+  // The solver works in a "frame": a whole-cube orientation in which the cube
+  // is described. On odd cubes the centre pieces define it; on the 2x2 the
+  // yellow-blue-orange (DBL) corner does.
+  const DIRS = { U: [0, 1, 0], D: [0, -1, 0], R: [1, 0, 0], L: [-1, 0, 0], F: [0, 0, 1], B: [0, 0, -1] };
+  const CORNER_FACES = [['U', 'R', 'F'], ['U', 'F', 'L'], ['U', 'L', 'B'], ['U', 'B', 'R'], ['D', 'F', 'R'], ['D', 'L', 'F'], ['D', 'B', 'L'], ['D', 'R', 'B']];
+  const EDGE_FACES = [['U', 'R'], ['U', 'F'], ['U', 'L'], ['U', 'B'], ['D', 'R'], ['D', 'F'], ['D', 'L'], ['D', 'B'], ['F', 'R'], ['F', 'L'], ['B', 'L'], ['B', 'R']];
+
+  function frameFromCenters() {
+    let u = null, f = null;
+    for (const c of cubies) {
+      if (c.children.length !== 1) continue;
+      const col = c.children[0].userData.color;
+      if (col === 'U') u = c.position.clone().normalize();
+      if (col === 'F') f = c.position.clone().normalize();
+    }
+    return [new THREE.Vector3().crossVectors(u, f), u, f];
+  }
+  function frameFromCorner() {
+    const c = cubies.find((q) => q.children.map((s) => s.userData.color).sort().join('') === 'BDL');
+    const e = new THREE.Matrix4().makeRotationFromQuaternion(c.quaternion).elements;
+    return [new THREE.Vector3(e[0], e[1], e[2]), new THREE.Vector3(e[4], e[5], e[6]), new THREE.Vector3(e[8], e[9], e[10])];
+  }
+
+  function readCube(frame, withEdges) {
+    const toFrame = (v) => frame.map((axis) => Math.round(axis.dot(v) * 2));
+    const stickers = new Map();
+    const n = new THREE.Vector3();
+    for (const c of cubies) {
+      const p = toFrame(c.position);
+      for (const s of c.children) {
+        n.copy(s.userData.normal).applyQuaternion(c.quaternion);
+        stickers.set(p.join() + '|' + toFrame(n).join(), s.userData.color);
+      }
+    }
+    const colorsAt = (faces) => {
+      const pos = [0, 0, 0];
+      for (const f of faces) for (let i = 0; i < 3; i++) pos[i] += DIRS[f][i] * half * 2;
+      return faces.map((f) => stickers.get(pos.join() + '|' + DIRS[f].map((x) => x * 2).join()));
+    };
+    const cube = { cp: [], co: [], ep: [], eo: [] };
+    CORNER_FACES.forEach((faces, i) => {
+      const cols = colorsAt(faces);
+      const ori = cols.findIndex((c) => c === 'U' || c === 'D');
+      const j = CORNER_FACES.findIndex((f) => f[1] === cols[(ori + 1) % 3] && f[2] === cols[(ori + 2) % 3]);
+      if (ori < 0 || j < 0) throw new Error('could not read a corner');
+      cube.cp[i] = j; cube.co[i] = ori;
+    });
+    EDGE_FACES.forEach((faces, i) => {
+      if (!withEdges) { cube.ep[i] = i; cube.eo[i] = 0; return; }
+      const cols = colorsAt(faces);
+      let j = EDGE_FACES.findIndex((f) => f[0] === cols[0] && f[1] === cols[1]), o = 0;
+      if (j < 0) { j = EDGE_FACES.findIndex((f) => f[0] === cols[1] && f[1] === cols[0]); o = 1; }
+      if (j < 0) throw new Error('could not read an edge');
+      cube.ep[i] = j; cube.eo[i] = o;
+    });
+    return cube;
+  }
+
+  // A move written in the solver's frame, turned into the world axes the 3D model uses.
+  function frameToWorld(frame, m) {
+    const w = frame['xyz'.indexOf(m.axis)];
+    const axis = Math.abs(w.x) > 0.5 ? 'x' : Math.abs(w.y) > 0.5 ? 'y' : 'z';
+    const s = w[axis] > 0 ? 1 : -1;
+    return { axis, layer: s * m.layer, dir: s * m.dir };
+  }
+
+  function computeSolution() {
+    if (N === 2 || N === 3) {
+      const frame = N === 3 ? frameFromCenters() : frameFromCorner();
+      const cube = readCube(frame, N === 3);
+      const idx = N === 3 ? CubeSolver.solve3(cube) : CubeSolver.solve2(cube);
+      const tokens = [], moves = [];
+      for (const m of idx) {
+        const letter = 'URFDLB'[(m / 3) | 0], power = (m % 3) + 1;
+        tokens.push(CubeSolver.moveName(m));
+        const q = frameToWorld(frame, faceMove(letter, power === 3));
+        moves.push(q);
+        if (power === 2) moves.push(Object.assign({}, q));
+      }
+      return { tokens, moves };
+    }
+    // 4x4 and 5x5: undo every turn made since the cube was last reset, cancelling turns that undo each other.
+    const moves = [];
+    for (const m of trail.slice().reverse()) {
+      const inv = { axis: m.axis, layer: m.layer, dir: -m.dir };
+      const top = moves[moves.length - 1];
+      if (top && top.axis === inv.axis && top.layer === inv.layer && top.dir === -inv.dir) moves.pop();
+      else moves.push(inv);
+    }
+    const tokens = [];
+    moves.forEach((m, i) => {
+      const prev = moves[i - 1];
+      if (prev && prev.axis === m.axis && prev.layer === m.layer && prev.dir === m.dir && !tokens[tokens.length - 1].endsWith('2')) {
+        tokens[tokens.length - 1] = tokens[tokens.length - 1].replace("'", '') + '2';
+      } else tokens.push(notation(m));
+    });
+    return { tokens, moves, replay: true };
+  }
+
   // ---------- Game state ----------
-  let state = 'idle'; // idle | scrambling | ready | solving | solved
+  let state = 'idle'; // idle | scrambling | ready | solving | solved | autosolve
   let moves = 0, t0 = 0, elapsed = 0;
   let history = [], log = [];
+  let trail = [];   // every turn applied since the last reset (used by the 4x4/5x5 solver)
+  let note = null;  // a one-off status message: { text, cls }
 
   const busy = () => !!anim || queue.length > 0;
 
@@ -319,10 +659,23 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
   }
 
   function onMoveDone(m) {
+    trail.push({ axis: m.axis, layer: m.layer, dir: m.dir });
     if (m.kind === 'scramble') {
       if (m.last) { state = 'ready'; updateUI(); }
       return;
     }
+    if (m.kind === 'solve') {
+      if (m.last) {
+        state = 'idle';
+        trail = [];
+        note = isSolved()
+          ? { text: 'Solved by the solver in ' + m.count + (m.count === 1 ? ' move.' : ' moves.'), cls: 'done' }
+          : { text: 'The solver finished but the cube is not solved. Please report this.', cls: 'warn' };
+        updateUI();
+      }
+      return;
+    }
+    note = null;
     if (m.kind === 'user') { history.push(m); log.push(notation(m)); }
     else if (m.kind === 'undo') { log.pop(); }
     moves++;
@@ -342,15 +695,15 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
   }
 
   function userMove(m) {
-    if (state === 'scrambling' || queue.length > 3) return;
+    if (state === 'scrambling' || state === 'autosolve' || queue.length > 3) return;
     queue.push({ axis: m.axis, layer: m.layer, dir: m.dir, kind: 'user' });
   }
 
   function resetCube() {
     queue.length = 0; anim = null;
     build(N);
-    moves = 0; elapsed = 0; history = []; log = [];
-    state = 'idle';
+    moves = 0; elapsed = 0; history = []; log = []; trail = [];
+    state = 'idle'; note = null;
     $('win').hidden = true;
     placeCamera();
     updateUI();
@@ -379,8 +732,58 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
     updateUI();
   }
 
+  // Start from a position typed in move notation, e.g. "R U R' U' F2" or "2R U" on bigger cubes.
+  function applySetup(text) {
+    if (state === 'scrambling' || state === 'autosolve') return;
+    const tokens = text.replace(/[’‘`´]/g, "'").trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return;
+    const list = [];
+    for (const t of tokens) {
+      const mm = /^(\d*)([URFDLBMES])(2'?|'2?)?$/i.exec(t);
+      const m = mm && faceMove(mm[2].toUpperCase(), (mm[3] || '').startsWith("'"), mm[1] ? parseInt(mm[1], 10) : 1);
+      if (!m) {
+        note = { text: 'Could not read "' + t + '". Use U D L R F B (M E S on odd cubes) with \' or 2.', cls: 'warn' };
+        updateUI();
+        return;
+      }
+      list.push(m);
+      if ((mm[3] || '').includes('2')) list.push(Object.assign({}, m));
+    }
+    resetCube();
+    state = 'scrambling';
+    list.forEach((m, i) => queue.push(Object.assign(m, { kind: 'scramble', fast: true, last: i === list.length - 1 })));
+    updateUI();
+  }
+
+  // Solve (or hint) from whatever position the cube is in now.
+  function runSolver(hintOnly) {
+    if (busy() || state === 'scrambling' || state === 'autosolve') return;
+    if (isSolved()) { note = { text: 'The cube is already solved.', cls: 'done' }; updateUI(); return; }
+    note = { text: CubeSolver.isReady(N) ? 'Thinking…' : 'Preparing the solver (first time takes a few seconds)…', cls: 'live' };
+    updateUI();
+    setTimeout(() => {
+      let sol;
+      try { sol = computeSolution(); } catch (err) {
+        note = { text: 'Could not solve this position: ' + err.message + '.', cls: 'warn' };
+        updateUI();
+        return;
+      }
+      if (hintOnly) {
+        note = { text: 'Hint: turn ' + sol.tokens[0] + ' (' + sol.tokens.length + ' moves from solved)', cls: 'live' };
+        updateUI();
+        return;
+      }
+      state = 'autosolve';
+      history = [];
+      log = sol.tokens.slice();
+      note = { text: (sol.replay ? 'Replaying your turns backwards: ' : 'Solving in ') + sol.tokens.length + ' moves…', cls: 'live' };
+      sol.moves.forEach((m, i) => queue.push(Object.assign(m, { kind: 'solve', last: i === sol.moves.length - 1, count: sol.tokens.length })));
+      updateUI();
+    }, 40);
+  }
+
   function undo() {
-    if (busy() || state === 'scrambling' || state === 'solved' || !history.length) return;
+    if (busy() || state === 'scrambling' || state === 'solved' || state === 'autosolve' || !history.length) return;
     const m = history.pop();
     queue.push({ axis: m.axis, layer: m.layer, dir: -m.dir, kind: 'undo' });
   }
@@ -396,9 +799,14 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
     else if (state === 'ready') { st.textContent = 'Scrambled. The timer starts on your first turn.'; st.classList.add('live'); }
     else if (state === 'solving') { st.textContent = 'Solving'; st.classList.add('live'); }
     else if (state === 'solved') { st.textContent = 'Solved in ' + fmt(elapsed); st.classList.add('done'); }
+    if (note) { st.textContent = note.text; st.className = 'status ' + note.cls; }
     if (state === 'idle' || state === 'scrambling' || state === 'ready') $('time').textContent = fmt(0);
     if (state === 'solved') $('time').textContent = fmt(elapsed);
-    $('undo').disabled = !history.length || state === 'scrambling' || state === 'solved';
+    const locked = state === 'scrambling' || state === 'autosolve';
+    $('undo').disabled = !history.length || locked || state === 'solved';
+    $('solve').disabled = locked;
+    $('hint').disabled = locked;
+    $('apply').disabled = locked;
     const shown = log.slice(-60);
     $('log').innerHTML = (log.length > 60 ? '<em>… </em>' : '') + shown.join(' ').replace(/</g, '&lt;');
     $('log').scrollLeft = 1e6;
@@ -505,6 +913,9 @@ kbd { font: 600 12px var(--font-mono); border: 1px solid var(--line); border-rad
   $('reset').addEventListener('click', resetCube);
   $('undo').addEventListener('click', undo);
   $('close').addEventListener('click', () => { $('win').hidden = true; });
+  $('solve').addEventListener('click', () => runSolver(false));
+  $('hint').addEventListener('click', () => runSolver(true));
+  $('setupForm').addEventListener('submit', (e) => { e.preventDefault(); applySetup($('setup').value); });
   $('size').addEventListener('change', (e) => { N = parseInt(e.target.value, 10); orbit.zoom = 1; resetCube(); });
 
   // ---------- Loop ----------
